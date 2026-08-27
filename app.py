@@ -1,5 +1,5 @@
 # Streamlit entry point.
-# Deploy trigger: v25 max forward differential within selected window
+# Deploy trigger: v25 min/max forward differential window
 from pathlib import Path
 
 _dashboard_path = Path(__file__).with_name("app_v25_overlay.py")
