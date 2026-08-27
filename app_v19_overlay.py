@@ -67,37 +67,35 @@ def _sector_all_under_tail_probabilities(diff_frame, warmup_years=10):
     return pd.DataFrame(rows, index=pd.DatetimeIndex(dates)).reindex(columns=frame.columns)
 
 
-def _persistent_underperformance_backtest(
+def _entry_exit_sector_backtest(
     series_map,
     under_tails,
-    tail_threshold,
+    rolling_diff,
+    entry_tail_threshold,
+    exit_diff_threshold,
     max_holdings=5,
 ):
-    if under_tails.empty or SECTOR_BENCHMARK_LABEL not in series_map:
-        return pd.DataFrame()
+    if SECTOR_BENCHMARK_LABEL not in series_map:
+        return pd.DataFrame(), pd.DataFrame()
 
     prices = pd.DataFrame(series_map).dropna().sort_index()
-    if prices.empty:
-        return pd.DataFrame()
+    if prices.empty or len(prices) < 2:
+        return pd.DataFrame(), pd.DataFrame()
 
     returns = prices.pct_change(fill_method=None)
-    signal_dates = under_tails.index.intersection(prices.index)
-    if signal_dates.empty:
-        return pd.DataFrame()
-
-    start_date = pd.Timestamp(signal_dates.min())
-    start_pos = int(prices.index.searchsorted(start_date))
-    if start_pos >= len(prices.index) - 1:
-        return pd.DataFrame()
-
     portfolio_value = 100.0
     benchmark_value = 100.0
     holdings = {}
 
-    dates = [prices.index[start_pos]]
+    dates = [prices.index[0]]
     strategy_values = [portfolio_value]
     benchmark_values = [benchmark_value]
     holding_counts = [0]
+
+    weight_rows = [{
+        col: (100.0 if col == SECTOR_BENCHMARK_LABEL else 0.0)
+        for col in prices.columns
+    }]
 
     def rebalance_add(new_sector):
         nonlocal holdings, portfolio_value
@@ -121,6 +119,22 @@ def _persistent_underperformance_backtest(
                 }
 
         holdings[new_sector] = total * new_weight
+
+    def rebalance_remove(sector_to_sell):
+        nonlocal holdings, portfolio_value
+        total = float(portfolio_value)
+        holdings.pop(sector_to_sell, None)
+        if not holdings:
+            return
+        remaining_total = float(sum(holdings.values()))
+        if remaining_total > 0:
+            holdings = {
+                sector: total * (value / remaining_total)
+                for sector, value in holdings.items()
+            }
+        else:
+            equal_value = total / len(holdings)
+            holdings = {sector: equal_value for sector in holdings}
 
     def rebalance_replace(old_sector, new_sector):
         nonlocal holdings, portfolio_value
@@ -146,37 +160,28 @@ def _persistent_underperformance_backtest(
 
         holdings[new_sector] = total * new_weight
 
-    previous_tail_row = None
-
-    if start_date in under_tails.index:
-        first_row = pd.to_numeric(under_tails.loc[start_date], errors="coerce")
-        first_candidates = first_row[first_row <= float(tail_threshold)].dropna().sort_values()
-        for sector in first_candidates.index:
-            if sector == SECTOR_BENCHMARK_LABEL or sector in holdings:
-                continue
-            if len(holdings) < max_holdings:
-                rebalance_add(sector)
-            else:
-                break
-        previous_tail_row = first_row
-
-    for pos in range(start_pos + 1, len(prices.index)):
+    for pos in range(1, len(prices.index)):
         date = prices.index[pos]
         signal_date = prices.index[pos - 1]
 
+        # Ausstiegssignal: 1Y-Renditedifferenz zum S&P 500 erreicht Y %-Punkte.
+        if holdings and signal_date in rolling_diff.index:
+            diff_row = pd.to_numeric(rolling_diff.loc[signal_date], errors="coerce")
+            exits = [
+                sector for sector in list(holdings)
+                if sector in diff_row.index
+                and pd.notna(diff_row.loc[sector])
+                and float(diff_row.loc[sector]) >= float(exit_diff_threshold)
+            ]
+            for sector in exits:
+                rebalance_remove(sector)
+
+        # Einstiegssignal: Underperformance-Tail-Wahrscheinlichkeit erreicht X % oder weniger.
         if signal_date in under_tails.index:
             current_tail_row = pd.to_numeric(under_tails.loc[signal_date], errors="coerce")
-            if previous_tail_row is None:
-                previous_tail_row = current_tail_row.copy()
-
-            crossing = (
-                current_tail_row.le(float(tail_threshold))
-                & (
-                    previous_tail_row.gt(float(tail_threshold))
-                    | previous_tail_row.isna()
-                )
-            )
-            candidates = current_tail_row[crossing].dropna().sort_values()
+            candidates = current_tail_row[
+                current_tail_row.le(float(entry_tail_threshold))
+            ].dropna().sort_values()
 
             for sector, candidate_tail in candidates.items():
                 if sector == SECTOR_BENCHMARK_LABEL or sector in holdings:
@@ -196,8 +201,6 @@ def _persistent_underperformance_backtest(
                 if float(candidate_tail) < weakest_tail:
                     rebalance_replace(weakest_sector, sector)
 
-            previous_tail_row = current_tail_row.copy()
-
         daily = returns.loc[date]
         benchmark_return = float(daily.get(SECTOR_BENCHMARK_LABEL, np.nan))
         if not np.isfinite(benchmark_return):
@@ -214,24 +217,35 @@ def _persistent_underperformance_backtest(
         else:
             portfolio_value *= 1.0 + benchmark_return
 
+        total = float(portfolio_value)
+        weights = {}
+        for col in prices.columns:
+            if holdings:
+                weights[col] = 100.0 * float(holdings.get(col, 0.0)) / total if total else 0.0
+            else:
+                weights[col] = 100.0 if col == SECTOR_BENCHMARK_LABEL else 0.0
+
         dates.append(date)
         strategy_values.append(portfolio_value)
         benchmark_values.append(benchmark_value)
         holding_counts.append(len(holdings))
+        weight_rows.append(weights)
 
-    return pd.DataFrame(
+    strategy = pd.DataFrame(
         {
-            "Persistente Underperformance-Strategie": strategy_values,
+            "Einstiegs-/Ausstiegsstrategie": strategy_values,
             "S&P 500": benchmark_values,
             "Anzahl Sektoren": holding_counts,
         },
         index=pd.DatetimeIndex(dates),
     )
+    weights = pd.DataFrame(weight_rows, index=pd.DatetimeIndex(dates)).fillna(0.0)
+    return strategy, weights
 
 
-def _persistent_underperformance_figure(frame):
+def _entry_exit_strategy_figure(frame):
     fig = go.Figure()
-    for col in ["Persistente Underperformance-Strategie", "S&P 500"]:
+    for col in ["Einstiegs-/Ausstiegsstrategie", "S&P 500"]:
         is_benchmark = col == "S&P 500"
         fig.add_trace(go.Scatter(
             x=frame.index,
@@ -259,6 +273,40 @@ def _persistent_underperformance_figure(frame):
         zeroline=False,
         type="log",
         title="Indexiert (Start = 100, log)",
+    )
+    layout["legend"] = dict(orientation="h", yanchor="top", y=-0.15, x=0)
+    fig.update_layout(**layout)
+    return fig
+
+
+def _sector_strategy_weights_figure(weight_history):
+    fig = go.Figure()
+    for col in weight_history.columns:
+        s = pd.to_numeric(weight_history[col], errors="coerce").fillna(0.0)
+        if col == SECTOR_BENCHMARK_LABEL:
+            color = "#6b7280"
+        else:
+            color = ACTIVE_SECTOR_COLORS.get(col, "#9ca3af")
+        fig.add_trace(go.Scatter(
+            x=weight_history.index,
+            y=s,
+            mode="lines",
+            name=col,
+            stackgroup="weights",
+            line=dict(width=0.8, color=color),
+            fillcolor=hex_rgba(color, 0.58),
+            hovertemplate="%{x|%d.%m.%Y}<br><b>%{y:.2f} %</b><extra>%{fullData.name}</extra>",
+        ))
+
+    layout = base_layout(True)
+    layout["height"] = 560
+    layout["hovermode"] = "closest"
+    layout["yaxis"] = dict(
+        showgrid=False,
+        zeroline=False,
+        range=[0, 100],
+        title="Gewicht in %",
+        ticksuffix=" %",
     )
     layout["legend"] = dict(orientation="h", yanchor="top", y=-0.15, x=0)
     fig.update_layout(**layout)
@@ -308,7 +356,7 @@ def render_sp500_sector_etfs():
             _sector_performance_figure(indexed),
             width="stretch",
             config={"displaylogo": False, "scrollZoom": True},
-            key="sector_perf_v19",
+            key="sector_perf_v20",
         )
     with c2:
         st.markdown("#### Drawdown")
@@ -316,7 +364,7 @@ def render_sp500_sector_etfs():
             _sector_drawdown_figure(series_map),
             width="stretch",
             config={"displaylogo": False, "scrollZoom": True},
-            key="sector_dd_v19",
+            key="sector_dd_v20",
         )
 
     c1, c2 = st.columns(2, gap="large")
@@ -326,7 +374,7 @@ def render_sp500_sector_etfs():
             _sector_correlation_figure(series_map),
             width="stretch",
             config={"displaylogo": False},
-            key="sector_corr_v19",
+            key="sector_corr_v20",
         )
     with c2:
         st.markdown("#### Rollierende 1-Jahres-Korrelation zum S&P 500")
@@ -334,7 +382,7 @@ def render_sp500_sector_etfs():
             _sector_rolling_corr_figure(series_map),
             width="stretch",
             config={"displaylogo": False, "scrollZoom": True},
-            key="sector_rolling_corr_v19",
+            key="sector_rolling_corr_v20",
         )
 
     rolling_diff = _sector_rolling_return_diff(series_map)
@@ -344,33 +392,57 @@ def render_sp500_sector_etfs():
             _sector_rolling_return_diff_figure(rolling_diff),
             width="stretch",
             config={"displaylogo": False, "scrollZoom": True},
-            key="sector_rolling_return_diff_v19",
+            key="sector_rolling_return_diff_v20",
         )
 
         under_tails = _sector_all_under_tail_probabilities(rolling_diff, warmup_years=10)
         if not under_tails.empty:
-            threshold = st.slider(
-                "Schwellenwert x – maximale Tail-Wahrscheinlichkeit für Aufnahme",
-                min_value=1,
-                max_value=25,
-                value=10,
-                step=1,
-                format="%d %%",
-                key="sector_persistent_under_tail_threshold",
-            )
-            strategy_frame = _persistent_underperformance_backtest(
+            c1, c2 = st.columns(2, gap="large")
+            with c1:
+                entry_threshold = st.slider(
+                    "Einstiegssignal X – maximale Tail-Wahrscheinlichkeit",
+                    min_value=1,
+                    max_value=25,
+                    value=10,
+                    step=1,
+                    format="%d %%",
+                    key="sector_entry_tail_threshold",
+                )
+            with c2:
+                exit_threshold = st.slider(
+                    "Ausstiegssignal Y – 1Y-Renditedifferenz zum S&P 500",
+                    min_value=-20,
+                    max_value=30,
+                    value=0,
+                    step=1,
+                    format="%d %-Pkt.",
+                    key="sector_exit_diff_threshold",
+                )
+
+            strategy_frame, weight_history = _entry_exit_sector_backtest(
                 series_map,
                 under_tails,
-                tail_threshold=threshold,
+                rolling_diff,
+                entry_tail_threshold=entry_threshold,
+                exit_diff_threshold=exit_threshold,
                 max_holdings=5,
             )
             if not strategy_frame.empty:
-                st.markdown("#### Persistente Underperformance-Strategie vs. S&P 500")
+                st.markdown("#### Einstiegs-/Ausstiegsstrategie vs. S&P 500")
                 st.plotly_chart(
-                    _persistent_underperformance_figure(strategy_frame),
+                    _entry_exit_strategy_figure(strategy_frame),
                     width="stretch",
                     config={"displaylogo": False, "scrollZoom": True},
-                    key="sector_persistent_under_backtest_v19",
+                    key="sector_entry_exit_backtest",
+                )
+
+            if not weight_history.empty:
+                st.markdown("#### Gewichtsentwicklung der Strategie")
+                st.plotly_chart(
+                    _sector_strategy_weights_figure(weight_history),
+                    width="stretch",
+                    config={"displaylogo": False, "scrollZoom": True},
+                    key="sector_entry_exit_weights",
                 )
 
     metrics = _sector_metrics(series_map)
