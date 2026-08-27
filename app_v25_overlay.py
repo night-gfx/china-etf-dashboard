@@ -19,7 +19,13 @@ def _all_sector_forward_relative_return_scatter(
     if benchmark is None or current_diff.empty:
         return None
 
-    forward_periods = max(int(round(float(forward_months) * 21)), 1)
+    max_months = int(forward_months)
+    min_months = int(st.session_state.get("sector_forward_min_months_v28", 1))
+    min_months = max(1, min(min_months, max_months))
+
+    min_periods = max(int(round(float(min_months) * 21)), 1)
+    max_periods = max(int(round(float(max_months) * 21)), min_periods)
+
     base_index = pd.DatetimeIndex(current_diff.index)
 
     benchmark_aligned = pd.to_numeric(
@@ -27,10 +33,10 @@ def _all_sector_forward_relative_return_scatter(
         errors="coerce",
     )
     n = len(base_index)
-    if n <= forward_periods:
+    if n <= max_periods:
         return None
 
-    usable_n = n - forward_periods
+    usable_n = n - max_periods
     current_dates = base_index[:usable_n]
     benchmark_values = benchmark_aligned.to_numpy(dtype=float)
     benchmark_start = benchmark_values[:usable_n]
@@ -55,7 +61,7 @@ def _all_sector_forward_relative_return_scatter(
         has_value = np.zeros(usable_n, dtype=bool)
 
         with np.errstate(divide="ignore", invalid="ignore"):
-            for offset in range(1, forward_periods + 1):
+            for offset in range(min_periods, max_periods + 1):
                 sector_future = sector_values[offset:offset + usable_n]
                 benchmark_future = benchmark_values[offset:offset + usable_n]
 
@@ -109,7 +115,7 @@ def _all_sector_forward_relative_return_scatter(
             hovertemplate=(
                 "Datum: %{customdata[0]}<br>"
                 "Aktuelle Renditedifferenz: %{x:.2f} %-Pkt.<br>"
-                f"Max. Forward-Differenz innerhalb {forward_months}M: "
+                f"Max. Forward-Differenz zwischen {min_months}M und {max_months}M: "
                 "%{y:.2f} %-Pkt.<br>"
                 "Maximum am: %{customdata[1]}"
                 "<extra>%{fullData.name}</extra>"
@@ -133,7 +139,10 @@ def _all_sector_forward_relative_return_scatter(
     layout["yaxis"] = dict(
         showgrid=False,
         zeroline=False,
-        title=f"Max. Forward-Renditedifferenz innerhalb {forward_months}M in %-Pkt.",
+        title=(
+            f"Max. Forward-Renditedifferenz zwischen "
+            f"{min_months}M und {max_months}M in %-Pkt."
+        ),
     )
     layout["legend"] = dict(
         orientation="h",
@@ -152,25 +161,47 @@ def render_sp500_sector_etfs():
     original_markdown = st.markdown
     original_slider = st.slider
 
-    def _markdown_with_forward_max(body, *args, **kwargs):
+    def _markdown_with_forward_window(body, *args, **kwargs):
         if (
             isinstance(body, str)
             and body.startswith("#### Renditedifferenz vs. Forward ")
             and body.endswith(" – alle Sektoren")
         ):
-            body = body.replace(
-                "#### Renditedifferenz vs. Forward ",
-                "#### Renditedifferenz vs. max. Forward-Renditedifferenz innerhalb ",
-                1,
+            min_months = int(
+                st.session_state.get("sector_forward_min_months_v28", 1)
+            )
+            max_months = int(
+                st.session_state.get("sector_forward_max_months_v28", 12)
+            )
+            body = (
+                "#### Renditedifferenz vs. max. Forward-Renditedifferenz "
+                f"zwischen {min_months}M und {max_months}M"
             )
         return original_markdown(body, *args, **kwargs)
 
     def _slider_with_forward_window(label, *args, **kwargs):
         if label == "Forward-Horizont Y (Monate)":
-            label = "Forward-Fenster X – Maximum innerhalb (Monate)"
+            min_months = original_slider(
+                "Forward-Fenster Minimum (Monate)",
+                min_value=1,
+                max_value=35,
+                value=1,
+                step=1,
+                key="sector_forward_min_months_v28",
+            )
+            default_max = max(12, int(min_months) + 1)
+            max_months = original_slider(
+                "Forward-Fenster Maximum (Monate)",
+                min_value=int(min_months),
+                max_value=36,
+                value=min(default_max, 36),
+                step=1,
+                key="sector_forward_max_months_v28",
+            )
+            return max_months
         return original_slider(label, *args, **kwargs)
 
-    st.markdown = _markdown_with_forward_max
+    st.markdown = _markdown_with_forward_window
     st.slider = _slider_with_forward_window
     try:
         _render_sp500_sector_etfs_core()
