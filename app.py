@@ -1,5 +1,5 @@
 # Streamlit entry point.
-# Deploy trigger: v24 full-history max sector differential forward analysis
+# Deploy trigger: v24 all-sector rolling differential forward analysis
 from pathlib import Path
 
 _dashboard_path = Path(__file__).with_name("app_v24_overlay.py")
