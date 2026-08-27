@@ -347,44 +347,6 @@ def render_sp500_sector_etfs():
             key="sector_rolling_return_diff_v19",
         )
 
-        probabilities = _sector_top2_extreme_probabilities(rolling_diff, warmup_years=10)
-        if not probabilities.empty:
-            c1, c2 = st.columns(2, gap="large")
-            with c1:
-                st.markdown("#### Top 2 Outperformance – 1Y-Differenz ab Auswertungsstart")
-                st.plotly_chart(
-                    _sector_rank_colored_figure(probabilities, "out", "diff"),
-                    width="stretch",
-                    config={"displaylogo": False, "scrollZoom": True},
-                    key="sector_top2_out_diff_v19",
-                )
-            with c2:
-                st.markdown("#### Bottom 2 Underperformance – 1Y-Differenz ab Auswertungsstart")
-                st.plotly_chart(
-                    _sector_rank_colored_figure(probabilities, "under", "diff"),
-                    width="stretch",
-                    config={"displaylogo": False, "scrollZoom": True},
-                    key="sector_bottom2_under_diff_v19",
-                )
-
-            c1, c2 = st.columns(2, gap="large")
-            with c1:
-                st.markdown("#### Wahrscheinlichkeit – Top 2 Outperformance")
-                st.plotly_chart(
-                    _sector_rank_colored_figure(probabilities, "out", "tail"),
-                    width="stretch",
-                    config={"displaylogo": False, "scrollZoom": True},
-                    key="sector_top2_out_prob_v19",
-                )
-            with c2:
-                st.markdown("#### Wahrscheinlichkeit – Bottom 2 Underperformance")
-                st.plotly_chart(
-                    _sector_rank_colored_figure(probabilities, "under", "tail"),
-                    width="stretch",
-                    config={"displaylogo": False, "scrollZoom": True},
-                    key="sector_bottom2_under_prob_v19",
-                )
-
         under_tails = _sector_all_under_tail_probabilities(rolling_diff, warmup_years=10)
         if not under_tails.empty:
             threshold = st.slider(
