@@ -1,5 +1,5 @@
 # Streamlit entry point.
-# Deploy trigger: v19 entry/exit sector strategy
+# Deploy trigger: fixed v19 entry/exit sector strategy with tail chart
 from pathlib import Path
 
 _dashboard_path = Path(__file__).with_name("app_v19_overlay.py")
