@@ -1,5 +1,5 @@
 # Streamlit entry point.
-# Deploy trigger: v20 tail entry/exit signals with drawdown and metrics
+# Deploy trigger: v20 Healthcare and Consumer Staples switch strategies
 from pathlib import Path
 
 _dashboard_path = Path(__file__).with_name("app_v20_overlay.py")
