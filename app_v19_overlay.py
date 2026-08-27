@@ -64,7 +64,10 @@ def _sector_all_under_tail_probabilities(diff_frame, warmup_years=10):
     if not rows:
         return pd.DataFrame()
 
-    return pd.DataFrame(rows, index=pd.DatetimeIndex(dates)).reindex(columns=frame.columns)
+    return pd.DataFrame(
+        rows,
+        index=pd.DatetimeIndex(dates),
+    ).reindex(columns=frame.columns)
 
 
 def _entry_exit_sector_backtest(
@@ -75,19 +78,32 @@ def _entry_exit_sector_backtest(
     exit_diff_threshold,
     max_holdings=5,
 ):
-    if SECTOR_BENCHMARK_LABEL not in series_map:
+    if (
+        under_tails.empty
+        or SECTOR_BENCHMARK_LABEL not in series_map
+    ):
         return pd.DataFrame(), pd.DataFrame()
 
     prices = pd.DataFrame(series_map).dropna().sort_index()
     if prices.empty or len(prices) < 2:
         return pd.DataFrame(), pd.DataFrame()
 
+    signal_dates = under_tails.index.intersection(prices.index)
+    if signal_dates.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    start_date = pd.Timestamp(signal_dates.min())
+    start_pos = int(prices.index.searchsorted(start_date))
+    if start_pos >= len(prices.index) - 1:
+        return pd.DataFrame(), pd.DataFrame()
+
     returns = prices.pct_change(fill_method=None)
+
     portfolio_value = 100.0
     benchmark_value = 100.0
     holdings = {}
 
-    dates = [prices.index[0]]
+    dates = [prices.index[start_pos]]
     strategy_values = [portfolio_value]
     benchmark_values = [benchmark_value]
     holding_counts = [0]
@@ -124,8 +140,10 @@ def _entry_exit_sector_backtest(
         nonlocal holdings, portfolio_value
         total = float(portfolio_value)
         holdings.pop(sector_to_sell, None)
+
         if not holdings:
             return
+
         remaining_total = float(sum(holdings.values()))
         if remaining_total > 0:
             holdings = {
@@ -134,7 +152,10 @@ def _entry_exit_sector_backtest(
             }
         else:
             equal_value = total / len(holdings)
-            holdings = {sector: equal_value for sector in holdings}
+            holdings = {
+                sector: equal_value
+                for sector in holdings
+            }
 
     def rebalance_replace(old_sector, new_sector):
         nonlocal holdings, portfolio_value
@@ -160,15 +181,20 @@ def _entry_exit_sector_backtest(
 
         holdings[new_sector] = total * new_weight
 
-    for pos in range(1, len(prices.index)):
+    previous_tail_row = None
+
+    for pos in range(start_pos + 1, len(prices.index)):
         date = prices.index[pos]
         signal_date = prices.index[pos - 1]
 
-        # Ausstiegssignal: 1Y-Renditedifferenz zum S&P 500 erreicht Y %-Punkte.
         if holdings and signal_date in rolling_diff.index:
-            diff_row = pd.to_numeric(rolling_diff.loc[signal_date], errors="coerce")
+            diff_row = pd.to_numeric(
+                rolling_diff.loc[signal_date],
+                errors="coerce",
+            )
             exits = [
-                sector for sector in list(holdings)
+                sector
+                for sector in list(holdings)
                 if sector in diff_row.index
                 and pd.notna(diff_row.loc[sector])
                 and float(diff_row.loc[sector]) >= float(exit_diff_threshold)
@@ -176,33 +202,63 @@ def _entry_exit_sector_backtest(
             for sector in exits:
                 rebalance_remove(sector)
 
-        # Einstiegssignal: Underperformance-Tail-Wahrscheinlichkeit erreicht X % oder weniger.
         if signal_date in under_tails.index:
-            current_tail_row = pd.to_numeric(under_tails.loc[signal_date], errors="coerce")
-            candidates = current_tail_row[
-                current_tail_row.le(float(entry_tail_threshold))
-            ].dropna().sort_values()
+            current_tail_row = pd.to_numeric(
+                under_tails.loc[signal_date],
+                errors="coerce",
+            )
+
+            if previous_tail_row is None:
+                crossing = current_tail_row.le(float(entry_tail_threshold))
+            else:
+                crossing = (
+                    current_tail_row.le(float(entry_tail_threshold))
+                    & (
+                        previous_tail_row.gt(float(entry_tail_threshold))
+                        | previous_tail_row.isna()
+                    )
+                )
+
+            candidates = (
+                current_tail_row[crossing]
+                .dropna()
+                .sort_values()
+            )
 
             for sector, candidate_tail in candidates.items():
-                if sector == SECTOR_BENCHMARK_LABEL or sector in holdings:
+                if (
+                    sector == SECTOR_BENCHMARK_LABEL
+                    or sector in holdings
+                ):
                     continue
 
                 if len(holdings) < max_holdings:
                     rebalance_add(sector)
                     continue
 
-                held_tails = current_tail_row.reindex(list(holdings)).dropna()
+                held_tails = current_tail_row.reindex(
+                    list(holdings)
+                ).dropna()
                 if held_tails.empty:
                     continue
 
                 weakest_sector = held_tails.idxmax()
-                weakest_tail = float(held_tails.loc[weakest_sector])
+                weakest_tail = float(
+                    held_tails.loc[weakest_sector]
+                )
 
                 if float(candidate_tail) < weakest_tail:
-                    rebalance_replace(weakest_sector, sector)
+                    rebalance_replace(
+                        weakest_sector,
+                        sector,
+                    )
+
+            previous_tail_row = current_tail_row.copy()
 
         daily = returns.loc[date]
-        benchmark_return = float(daily.get(SECTOR_BENCHMARK_LABEL, np.nan))
+        benchmark_return = float(
+            daily.get(SECTOR_BENCHMARK_LABEL, np.nan)
+        )
         if not np.isfinite(benchmark_return):
             continue
 
@@ -221,9 +277,17 @@ def _entry_exit_sector_backtest(
         weights = {}
         for col in prices.columns:
             if holdings:
-                weights[col] = 100.0 * float(holdings.get(col, 0.0)) / total if total else 0.0
+                weights[col] = (
+                    100.0 * float(holdings.get(col, 0.0)) / total
+                    if total
+                    else 0.0
+                )
             else:
-                weights[col] = 100.0 if col == SECTOR_BENCHMARK_LABEL else 0.0
+                weights[col] = (
+                    100.0
+                    if col == SECTOR_BENCHMARK_LABEL
+                    else 0.0
+                )
 
         dates.append(date)
         strategy_values.append(portfolio_value)
@@ -239,13 +303,21 @@ def _entry_exit_sector_backtest(
         },
         index=pd.DatetimeIndex(dates),
     )
-    weights = pd.DataFrame(weight_rows, index=pd.DatetimeIndex(dates)).fillna(0.0)
+    weights = pd.DataFrame(
+        weight_rows,
+        index=pd.DatetimeIndex(dates),
+    ).fillna(0.0)
+
     return strategy, weights
 
 
 def _entry_exit_strategy_figure(frame):
     fig = go.Figure()
-    for col in ["Einstiegs-/Ausstiegsstrategie", "S&P 500"]:
+
+    for col in [
+        "Einstiegs-/Ausstiegsstrategie",
+        "S&P 500",
+    ]:
         is_benchmark = col == "S&P 500"
         fig.add_trace(go.Scatter(
             x=frame.index,
@@ -274,28 +346,49 @@ def _entry_exit_strategy_figure(frame):
         type="log",
         title="Indexiert (Start = 100, log)",
     )
-    layout["legend"] = dict(orientation="h", yanchor="top", y=-0.15, x=0)
+    layout["legend"] = dict(
+        orientation="h",
+        yanchor="top",
+        y=-0.15,
+        x=0,
+    )
     fig.update_layout(**layout)
     return fig
 
 
 def _sector_strategy_weights_figure(weight_history):
     fig = go.Figure()
+
     for col in weight_history.columns:
-        s = pd.to_numeric(weight_history[col], errors="coerce").fillna(0.0)
+        s = pd.to_numeric(
+            weight_history[col],
+            errors="coerce",
+        ).fillna(0.0)
+
         if col == SECTOR_BENCHMARK_LABEL:
             color = "#6b7280"
         else:
-            color = ACTIVE_SECTOR_COLORS.get(col, "#9ca3af")
+            color = ACTIVE_SECTOR_COLORS.get(
+                col,
+                "#9ca3af",
+            )
+
         fig.add_trace(go.Scatter(
             x=weight_history.index,
             y=s,
             mode="lines",
             name=col,
             stackgroup="weights",
-            line=dict(width=0.8, color=color),
+            line=dict(
+                width=0.8,
+                color=color,
+            ),
             fillcolor=hex_rgba(color, 0.58),
-            hovertemplate="%{x|%d.%m.%Y}<br><b>%{y:.2f} %</b><extra>%{fullData.name}</extra>",
+            hovertemplate=(
+                "%{x|%d.%m.%Y}<br>"
+                "<b>%{y:.2f} %</b>"
+                "<extra>%{fullData.name}</extra>"
+            ),
         ))
 
     layout = base_layout(True)
@@ -308,7 +401,69 @@ def _sector_strategy_weights_figure(weight_history):
         title="Gewicht in %",
         ticksuffix=" %",
     )
-    layout["legend"] = dict(orientation="h", yanchor="top", y=-0.15, x=0)
+    layout["legend"] = dict(
+        orientation="h",
+        yanchor="top",
+        y=-0.15,
+        x=0,
+    )
+    fig.update_layout(**layout)
+    return fig
+
+
+def _sector_tail_probability_figure(under_tails, entry_threshold):
+    fig = go.Figure()
+
+    for col in under_tails.columns:
+        s = pd.to_numeric(
+            under_tails[col],
+            errors="coerce",
+        ).dropna()
+        if s.empty:
+            continue
+
+        color = ACTIVE_SECTOR_COLORS.get(
+            col,
+            "#9ca3af",
+        )
+        fig.add_trace(go.Scatter(
+            x=s.index,
+            y=s,
+            mode="lines",
+            name=col,
+            line=dict(
+                width=1.7,
+                color=color,
+            ),
+            hovertemplate=(
+                "%{x|%d.%m.%Y}<br>"
+                "<b>%{y:.2f} %</b>"
+                "<extra>%{fullData.name}</extra>"
+            ),
+        ))
+
+    fig.add_hline(
+        y=float(entry_threshold),
+        line_dash="dash",
+        line_width=1.2,
+    )
+
+    layout = base_layout(True)
+    layout["height"] = 540
+    layout["hovermode"] = "closest"
+    layout["yaxis"] = dict(
+        showgrid=False,
+        zeroline=False,
+        range=[0, 100],
+        title="Tail-Wahrscheinlichkeit",
+        ticksuffix=" %",
+    )
+    layout["legend"] = dict(
+        orientation="h",
+        yanchor="top",
+        y=-0.15,
+        x=0,
+    )
     fig.update_layout(**layout)
     return fig
 
@@ -324,6 +479,7 @@ def render_sp500_sector_etfs():
         ticker = item["ticker"]
         if ticker not in raw:
             continue
+
         overview_rows.append({
             "Sektor": item["sector"],
             "ETF": ticker,
@@ -339,12 +495,17 @@ def render_sp500_sector_etfs():
         _sector_overview_style(overview),
         width="stretch",
         hide_index=True,
-        height=compact_height(len(overview), maximum=500),
+        height=compact_height(
+            len(overview),
+            maximum=500,
+        ),
     )
 
     series_map = _common_active_sector_series(raw)
     if not series_map:
-        st.error("Kein gemeinsamer Datenzeitraum für alle Sektor-ETFs verfügbar.")
+        st.error(
+            "Kein gemeinsamer Datenzeitraum für alle Sektor-ETFs verfügbar."
+        )
         return
 
     indexed = _indexed_individually(series_map)
@@ -355,16 +516,23 @@ def render_sp500_sector_etfs():
         st.plotly_chart(
             _sector_performance_figure(indexed),
             width="stretch",
-            config={"displaylogo": False, "scrollZoom": True},
-            key="sector_perf_v20",
+            config={
+                "displaylogo": False,
+                "scrollZoom": True,
+            },
+            key="sector_perf_v21",
         )
+
     with c2:
         st.markdown("#### Drawdown")
         st.plotly_chart(
             _sector_drawdown_figure(series_map),
             width="stretch",
-            config={"displaylogo": False, "scrollZoom": True},
-            key="sector_dd_v20",
+            config={
+                "displaylogo": False,
+                "scrollZoom": True,
+            },
+            key="sector_dd_v21",
         )
 
     c1, c2 = st.columns(2, gap="large")
@@ -374,83 +542,138 @@ def render_sp500_sector_etfs():
             _sector_correlation_figure(series_map),
             width="stretch",
             config={"displaylogo": False},
-            key="sector_corr_v20",
+            key="sector_corr_v21",
         )
+
     with c2:
-        st.markdown("#### Rollierende 1-Jahres-Korrelation zum S&P 500")
+        st.markdown(
+            "#### Rollierende 1-Jahres-Korrelation zum S&P 500"
+        )
         st.plotly_chart(
             _sector_rolling_corr_figure(series_map),
             width="stretch",
-            config={"displaylogo": False, "scrollZoom": True},
-            key="sector_rolling_corr_v20",
+            config={
+                "displaylogo": False,
+                "scrollZoom": True,
+            },
+            key="sector_rolling_corr_v21",
         )
 
     rolling_diff = _sector_rolling_return_diff(series_map)
     if not rolling_diff.empty:
-        st.markdown("#### Rollierende 1-Jahres-Renditedifferenz zum S&P 500 (seit Inception)")
+        st.markdown(
+            "#### Rollierende 1-Jahres-Renditedifferenz "
+            "zum S&P 500 (seit Inception)"
+        )
         st.plotly_chart(
-            _sector_rolling_return_diff_figure(rolling_diff),
+            _sector_rolling_return_diff_figure(
+                rolling_diff
+            ),
             width="stretch",
-            config={"displaylogo": False, "scrollZoom": True},
-            key="sector_rolling_return_diff_v20",
+            config={
+                "displaylogo": False,
+                "scrollZoom": True,
+            },
+            key="sector_rolling_return_diff_v21",
         )
 
-        under_tails = _sector_all_under_tail_probabilities(rolling_diff, warmup_years=10)
+        under_tails = _sector_all_under_tail_probabilities(
+            rolling_diff,
+            warmup_years=10,
+        )
+
         if not under_tails.empty:
             c1, c2 = st.columns(2, gap="large")
+
             with c1:
                 entry_threshold = st.slider(
-                    "Einstiegssignal X – maximale Tail-Wahrscheinlichkeit",
+                    "Einstiegssignal X – maximale Tail-Wahrscheinlichkeit (%)",
                     min_value=1,
                     max_value=25,
                     value=10,
                     step=1,
-                    format="%d %%",
-                    key="sector_entry_tail_threshold",
+                    key="sector_entry_tail_threshold_v21",
                 )
+
             with c2:
                 exit_threshold = st.slider(
-                    "Ausstiegssignal Y – 1Y-Renditedifferenz zum S&P 500",
+                    "Ausstiegssignal Y – 1Y-Renditedifferenz zum S&P 500 (%-Pkt.)",
                     min_value=-20,
                     max_value=30,
                     value=0,
                     step=1,
-                    format="%d %-Pkt.",
-                    key="sector_exit_diff_threshold",
+                    key="sector_exit_diff_threshold_v21",
                 )
 
-            strategy_frame, weight_history = _entry_exit_sector_backtest(
-                series_map,
-                under_tails,
-                rolling_diff,
-                entry_tail_threshold=entry_threshold,
-                exit_diff_threshold=exit_threshold,
-                max_holdings=5,
+            st.markdown("#### Tail-Wahrscheinlichkeiten")
+            st.plotly_chart(
+                _sector_tail_probability_figure(
+                    under_tails,
+                    entry_threshold,
+                ),
+                width="stretch",
+                config={
+                    "displaylogo": False,
+                    "scrollZoom": True,
+                },
+                key="sector_tail_probabilities_v21",
             )
+
+            strategy_frame, weight_history = (
+                _entry_exit_sector_backtest(
+                    series_map,
+                    under_tails,
+                    rolling_diff,
+                    entry_tail_threshold=entry_threshold,
+                    exit_diff_threshold=exit_threshold,
+                    max_holdings=5,
+                )
+            )
+
             if not strategy_frame.empty:
-                st.markdown("#### Einstiegs-/Ausstiegsstrategie vs. S&P 500")
+                st.markdown(
+                    "#### Einstiegs-/Ausstiegsstrategie vs. S&P 500"
+                )
                 st.plotly_chart(
-                    _entry_exit_strategy_figure(strategy_frame),
+                    _entry_exit_strategy_figure(
+                        strategy_frame
+                    ),
                     width="stretch",
-                    config={"displaylogo": False, "scrollZoom": True},
-                    key="sector_entry_exit_backtest",
+                    config={
+                        "displaylogo": False,
+                        "scrollZoom": True,
+                    },
+                    key="sector_entry_exit_backtest_v21",
                 )
 
             if not weight_history.empty:
-                st.markdown("#### Gewichtsentwicklung der Strategie")
+                st.markdown(
+                    "#### Gewichtsentwicklung der Strategie"
+                )
                 st.plotly_chart(
-                    _sector_strategy_weights_figure(weight_history),
+                    _sector_strategy_weights_figure(
+                        weight_history
+                    ),
                     width="stretch",
-                    config={"displaylogo": False, "scrollZoom": True},
-                    key="sector_entry_exit_weights",
+                    config={
+                        "displaylogo": False,
+                        "scrollZoom": True,
+                    },
+                    key="sector_entry_exit_weights_v21",
                 )
 
     metrics = _sector_metrics(series_map)
     st.markdown("#### Kennzahlen")
     st.dataframe(
-        style_heat(metrics, reverse_columns={"Volatilität p.a."}),
+        style_heat(
+            metrics,
+            reverse_columns={"Volatilität p.a."},
+        ),
         width="stretch",
-        height=compact_height(len(metrics), maximum=520),
+        height=compact_height(
+            len(metrics),
+            maximum=520,
+        ),
     )
 
     annual_sharpe = _sector_annual_sharpe(series_map)
@@ -458,13 +681,22 @@ def render_sp500_sector_etfs():
     st.dataframe(
         style_heat(annual_sharpe),
         width="stretch",
-        height=compact_height(len(annual_sharpe), maximum=520),
+        height=compact_height(
+            len(annual_sharpe),
+            maximum=520,
+        ),
     )
 
 
 top_page = _text_nav(
-    ["China ETF Dashboard", "Asset Allocation Backtesting Tool", "S&P 500 Sector ETFs"],
-    "top_page", "China ETF Dashboard", "top_text_nav"
+    [
+        "China ETF Dashboard",
+        "Asset Allocation Backtesting Tool",
+        "S&P 500 Sector ETFs",
+    ],
+    "top_page",
+    "China ETF Dashboard",
+    "top_text_nav",
 )
 st.session_state.after_tax = True
 
