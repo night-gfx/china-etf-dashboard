@@ -10,7 +10,7 @@ _core = _source.split("\ndef render_sp500_sector_etfs():", 1)[0]
 exec(compile(_core, "app_v23_core", "exec"), globals(), globals())
 
 
-def _max_forward_relative_return_scatter(
+def _all_sector_forward_relative_return_scatter(
     series_map,
     current_diff,
     forward_months,
@@ -22,66 +22,50 @@ def _max_forward_relative_return_scatter(
     forward_periods = max(int(round(float(forward_months) * 21)), 1)
     benchmark_forward = benchmark.shift(-forward_periods) / benchmark - 1.0
 
-    forward_data = {}
+    fig = go.Figure()
+    points_found = False
+
     for label in current_diff.columns:
         sector = series_map.get(label)
         if sector is None:
             continue
+
         sector_forward = sector.shift(-forward_periods) / sector - 1.0
-        forward_data[label] = (sector_forward - benchmark_forward) * 100.0
+        forward_diff = (sector_forward - benchmark_forward) * 100.0
 
-    forward_diff = pd.DataFrame(forward_data).reindex(current_diff.index)
-    if forward_diff.empty:
-        return None
+        pair = pd.concat(
+            [
+                pd.to_numeric(current_diff[label], errors="coerce").rename("current"),
+                pd.to_numeric(forward_diff, errors="coerce").rename("forward"),
+            ],
+            axis=1,
+        ).dropna()
 
-    numeric_current = current_diff.apply(pd.to_numeric, errors="coerce")
-    max_current = numeric_current.max(axis=1)
-    max_sector = numeric_current.idxmax(axis=1)
-
-    selected_forward = pd.Series(np.nan, index=numeric_current.index, dtype=float)
-    for label in numeric_current.columns:
-        if label not in forward_diff.columns:
-            continue
-        mask = max_sector.eq(label)
-        selected_forward.loc[mask] = pd.to_numeric(
-            forward_diff.loc[mask, label],
-            errors="coerce",
-        )
-
-    pair = pd.DataFrame({
-        "current": max_current,
-        "forward": selected_forward,
-        "sector": max_sector,
-    }).dropna(subset=["current", "forward", "sector"])
-
-    if pair.empty:
-        return None
-
-    fig = go.Figure()
-
-    for label in numeric_current.columns:
-        points = pair.loc[pair["sector"] == label]
-        if points.empty:
+        if pair.empty:
             continue
 
+        points_found = True
         color = ACTIVE_SECTOR_COLORS.get(label, "#9ca3af")
-        dates = points.index.strftime("%d.%m.%Y").to_numpy().reshape(-1, 1)
+        dates = pair.index.strftime("%d.%m.%Y").to_numpy().reshape(-1, 1)
 
         fig.add_trace(go.Scattergl(
-            x=points["current"],
-            y=points["forward"],
+            x=pair["current"],
+            y=pair["forward"],
             mode="markers",
             name=label,
-            marker=dict(size=6, opacity=0.48, color=color),
+            marker=dict(size=5, opacity=0.42, color=color),
             customdata=dates,
             hovertemplate=(
                 "Datum: %{customdata[0]}<br>"
-                "Max. aktuelle Differenz: %{x:.2f} %-Pkt.<br>"
-                f"Forward {forward_months}M-Differenz: "
+                "Aktuelle Renditedifferenz: %{x:.2f} %-Pkt.<br>"
+                f"Forward {forward_months}M-Renditedifferenz: "
                 "%{y:.2f} %-Pkt."
                 "<extra>%{fullData.name}</extra>"
             ),
         ))
+
+    if not points_found:
+        return None
 
     fig.add_hline(y=0, line_width=1, line_dash="dot")
     fig.add_vline(x=0, line_width=1, line_dash="dot")
@@ -92,7 +76,7 @@ def _max_forward_relative_return_scatter(
     layout["xaxis"] = dict(
         showgrid=False,
         zeroline=False,
-        title="Maximale aktuelle Renditedifferenz (Sektor − S&P 500) in %-Pkt.",
+        title="Aktuelle rollierende Renditedifferenz (Sektor − S&P 500) in %-Pkt.",
     )
     layout["yaxis"] = dict(
         showgrid=False,
@@ -152,7 +136,7 @@ def render_sp500_sector_etfs():
             _sector_performance_figure(indexed),
             width="stretch",
             config={"displaylogo": False, "scrollZoom": True},
-            key="sector_perf_v26",
+            key="sector_perf_v27",
         )
     with c2:
         st.markdown("#### Drawdown")
@@ -160,7 +144,7 @@ def render_sp500_sector_etfs():
             _sector_drawdown_figure(series_map),
             width="stretch",
             config={"displaylogo": False, "scrollZoom": True},
-            key="sector_dd_v26",
+            key="sector_dd_v27",
         )
 
     c1, c2 = st.columns(2, gap="large")
@@ -170,7 +154,7 @@ def render_sp500_sector_etfs():
             _sector_correlation_figure(series_map),
             width="stretch",
             config={"displaylogo": False},
-            key="sector_corr_v26",
+            key="sector_corr_v27",
         )
     with c2:
         st.markdown("#### Rollierende 1-Jahres-Korrelation zum S&P 500")
@@ -178,7 +162,7 @@ def render_sp500_sector_etfs():
             _sector_rolling_corr_figure(series_map),
             width="stretch",
             config={"displaylogo": False, "scrollZoom": True},
-            key="sector_rolling_corr_v26",
+            key="sector_rolling_corr_v27",
         )
 
     s1, s2 = st.columns(2, gap="large")
@@ -189,7 +173,7 @@ def render_sp500_sector_etfs():
             max_value=60,
             value=12,
             step=1,
-            key="sector_diff_lookback_months_v26",
+            key="sector_diff_lookback_months_v27",
         )
     with s2:
         forward_months = st.slider(
@@ -198,7 +182,7 @@ def render_sp500_sector_etfs():
             max_value=36,
             value=12,
             step=1,
-            key="sector_forward_months_v26",
+            key="sector_forward_months_v27",
         )
 
     rolling_diff = _rolling_relative_return_diff(
@@ -219,14 +203,14 @@ def render_sp500_sector_etfs():
                 ),
                 width="stretch",
                 config={"displaylogo": False, "scrollZoom": True},
-                key="sector_dynamic_rolling_diff_v26",
+                key="sector_dynamic_rolling_diff_v27",
             )
 
         with c2:
             st.markdown(
-                f"#### Maximale Renditedifferenz vs. Forward {forward_months}M – gesamter Zeitraum"
+                f"#### Renditedifferenz vs. Forward {forward_months}M – alle Sektoren"
             )
-            forward_fig = _max_forward_relative_return_scatter(
+            forward_fig = _all_sector_forward_relative_return_scatter(
                 series_map,
                 rolling_diff,
                 forward_months,
@@ -236,7 +220,7 @@ def render_sp500_sector_etfs():
                     forward_fig,
                     width="stretch",
                     config={"displaylogo": False, "scrollZoom": True},
-                    key="sector_max_forward_scatter_v26",
+                    key="sector_all_forward_scatter_v27",
                 )
 
     metrics = _sector_metrics(series_map)
