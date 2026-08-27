@@ -1,5 +1,5 @@
 # Streamlit entry point.
-# Deploy trigger: v19 persistent sector strategy
+# Deploy trigger: v19 without top/bottom-2 charts
 from pathlib import Path
 
 _dashboard_path = Path(__file__).with_name("app_v19_overlay.py")
