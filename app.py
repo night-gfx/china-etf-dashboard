@@ -1,4 +1,5 @@
 # Streamlit entry point.
+# Deploy trigger: v19 persistent sector strategy
 from pathlib import Path
 
 _dashboard_path = Path(__file__).with_name("app_v19_overlay.py")
